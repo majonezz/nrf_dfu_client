@@ -296,8 +296,6 @@ void enter_bootloader(void) {
     src.l2_family = AF_BLUETOOTH;
     src.l2_cid = htobs(4); // ATT CID
 
-    bind(sock, (struct sockaddr *)&src, sizeof(src));
-
     if (bind(sock, (struct sockaddr *)&src, sizeof(src)) < 0) {
         LOG_ERR("Failed to bind socket: %s", strerror(errno));
     }
