@@ -42,9 +42,7 @@
 #include <sys/select.h>
 #include <bluetooth/bluetooth.h>
 #include <bluetooth/l2cap.h>
-
-#include <assert.h>
-
+#include <errno.h>
 #include <getopt.h>
 #include "json.h"
 #include "zipc.h"
@@ -297,7 +295,12 @@ void enter_bootloader(void) {
     struct sockaddr_l2 src = {0}, dst = {0};
     src.l2_family = AF_BLUETOOTH;
     src.l2_cid = htobs(4); // ATT CID
+
     bind(sock, (struct sockaddr *)&src, sizeof(src));
+
+    if (bind(sock, (struct sockaddr *)&src, sizeof(src)) < 0) {
+        LOG_ERR("Failed to bind socket: %s", strerror(errno));
+    }
     dst.l2_family = AF_BLUETOOTH;
     str2ba(conf.ble_addr, &dst.l2_bdaddr);
     dst.l2_cid = htobs(4);
@@ -305,7 +308,7 @@ void enter_bootloader(void) {
 
 
     if (connect(sock, (struct sockaddr *)&dst, sizeof(dst)) < 0) {
-	LOG_ERR("Could not connect, trying bootloader mode...");
+	LOG_ERR("Could not connect: %s, trying bootloader mode...",strerror(errno));
 	return;
 
     } else LOG_INF("Connected.");
