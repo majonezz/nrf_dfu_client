@@ -83,17 +83,40 @@
 
 struct config conf;
 
-// Packet structure for management commands
-struct mgmt_pkt {
+
+// Strict BlueZ kernel Mgmt header layout
+struct mgmt_hdr {
     uint16_t opcode;
-    uint16_t index; // Controller ID (0 for hci0)
-    uint16_t len;
-    uint8_t  val;   // 1 = Enable, 0 = Disable
+    uint16_t index;  // Controller ID (e.g. 0 for hci0)
+    uint16_t len;    // Length of the payload following this header
 } __attribute__((packed));
+
+// Explicit definition container for a single uint8 parameter command
+struct mgmt_mode_cmd {
+    struct mgmt_hdr hdr;
+    uint8_t val;
+} __attribute__((packed));
+
+static int send_mgmt_cmd(int sk, uint16_t opcode, uint16_t index, uint8_t value) {
+    struct mgmt_mode_cmd cmd;
+    
+    cmd.hdr.opcode = htole16(opcode);
+    cmd.hdr.index  = htole16(index);
+    cmd.hdr.len    = htole16(sizeof(uint8_t)); // Crucial: must equal trailing data size
+    cmd.val        = value;
+
+    if (write(sk, &cmd, sizeof(cmd)) < 0) {
+        perror("Mgmt write failed");
+        return -1;
+    }
+    return 0;
+}
+
 
 int configure_hci0_for_ble(void) {
     int sk;
     struct sockaddr_hci addr;
+    uint16_t controller_idx = 0; // hci0
 
     // 1. Open the BlueZ Kernel Management Control Channel
     sk = socket(AF_BLUETOOTH, SOCK_RAW | SOCK_CLOEXEC, BTPROTO_HCI);
@@ -113,35 +136,30 @@ int configure_hci0_for_ble(void) {
         return -1;
     }
 
-    struct mgmt_pkt pkt;
-
-    // 2. Step 1: Turn Power OFF first to allow configuration changes
-    pkt.opcode = MGMT_OP_SET_POWERED;
-    pkt.index = 0; // hci0
-    pkt.len = 1;
-    pkt.val = 0; // OFF
-    write(sk, &pkt, sizeof(pkt));
-    usleep(100000); // Give the driver a moment
-
-    // 3. Step 2: Force Low Energy (LE) Mode ON in the kernel
-    pkt.opcode = MGMT_OP_SET_LE;
-    pkt.index = 0; // hci0
-    pkt.len = 1;
-    pkt.val = 1; // ON
-    if (write(sk, &pkt, sizeof(pkt)) < 0) {
-        perror("Failed to send Set LE command");
+    // 1. Force absolute power OFF first.
+    // Older kernels reject LE toggles if the driver thinks it's still alive.
+    if (send_mgmt_cmd(sk, MGMT_OP_SET_POWERED, controller_idx, 0) < 0) {
+        fprintf(stderr, "Failed to power off controller\n");
     }
-    usleep(100000);
+    usleep(300000); // 300ms: Embedded controllers need longer to reset state machines
 
-    // 4. Step 3: Turn Power ON
-    pkt.opcode = MGMT_OP_SET_POWERED;
-    pkt.index = 0; // hci0
-    pkt.len = 1;
-    pkt.val = 1; // ON
-    if (write(sk, &pkt, sizeof(pkt)) < 0) {
-        perror("Failed to send Set Powered command");
+    // 2. Force Low Energy (LE) Mode ON
+    if (send_mgmt_cmd(sk, MGMT_OP_SET_LE, controller_idx, 1) < 0) {
+        fprintf(stderr, "Failed to set LE command\n");
+        close(sk);
+        return -1;
     }
-    usleep(200000); // Wait for controller to finish boot cycle
+    usleep(200000);
+
+    // 3. Turn Power back ON 
+    if (send_mgmt_cmd(sk, MGMT_OP_SET_POWERED, controller_idx, 1) < 0) {
+        fprintf(stderr, "Failed to power on controller\n");
+        close(sk);
+        return -1;
+    }
+    usleep(300000); // Allow hardware link layer to settle
+
+
 
     close(sk);
     return 0;
