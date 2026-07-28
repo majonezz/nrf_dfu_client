@@ -41,6 +41,7 @@
 #include <sys/socket.h>
 #include <sys/select.h>
 #include <bluetooth/bluetooth.h>
+#include <bluetooth/hci.h>
 #include <bluetooth/l2cap.h>
 #include <errno.h>
 #include <getopt.h>
@@ -69,7 +70,86 @@
 #define ATT_OP_WRITE_CMD                 0x52 // Write without response
 #define ATT_OP_HANDLE_VAL_NOTIF          0x1b
 
+
+// Standard BlueZ kernel constants for control channel
+//#define AF_BLUETOOTH        31
+#define BTPROTO_HCI         1
+#define HCI_CHANNEL_CONTROL 3
+
+// Mgmt API Command Opcodes
+#define MGMT_OP_SET_POWERED 0x0005
+#define MGMT_OP_SET_LE      0x000D
+
+
 struct config conf;
+
+// Packet structure for management commands
+struct mgmt_pkt {
+    uint16_t opcode;
+    uint16_t index; // Controller ID (0 for hci0)
+    uint16_t len;
+    uint8_t  val;   // 1 = Enable, 0 = Disable
+} __attribute__((packed));
+
+int configure_hci0_for_ble(void) {
+    int sk;
+    struct sockaddr_hci addr;
+
+    // 1. Open the BlueZ Kernel Management Control Channel
+    sk = socket(AF_BLUETOOTH, SOCK_RAW | SOCK_CLOEXEC, BTPROTO_HCI);
+    if (sk < 0) {
+        perror("Failed to open mgmt socket");
+        return -1;
+    }
+
+    memset(&addr, 0, sizeof(addr));
+    addr.hci_family = AF_BLUETOOTH;
+    addr.hci_channel = HCI_CHANNEL_CONTROL; // Talk directly to kernel mgmt
+    addr.hci_dev = HCI_DEV_NONE; // Non-specific adapter for binding
+
+    if (bind(sk, (struct sockaddr *) &addr, sizeof(addr)) < 0) {
+        perror("Failed to bind mgmt socket");
+        close(sk);
+        return -1;
+    }
+
+    struct mgmt_pkt pkt;
+
+    // 2. Step 1: Turn Power OFF first to allow configuration changes
+    pkt.opcode = MGMT_OP_SET_POWERED;
+    pkt.index = 0; // hci0
+    pkt.len = 1;
+    pkt.val = 0; // OFF
+    write(sk, &pkt, sizeof(pkt));
+    usleep(100000); // Give the driver a moment
+
+    // 3. Step 2: Force Low Energy (LE) Mode ON in the kernel
+    pkt.opcode = MGMT_OP_SET_LE;
+    pkt.index = 0; // hci0
+    pkt.len = 1;
+    pkt.val = 1; // ON
+    if (write(sk, &pkt, sizeof(pkt)) < 0) {
+        perror("Failed to send Set LE command");
+    }
+    usleep(100000);
+
+    // 4. Step 3: Turn Power ON
+    pkt.opcode = MGMT_OP_SET_POWERED;
+    pkt.index = 0; // hci0
+    pkt.len = 1;
+    pkt.val = 1; // ON
+    if (write(sk, &pkt, sizeof(pkt)) < 0) {
+        perror("Failed to send Set Powered command");
+    }
+    usleep(200000); // Wait for controller to finish boot cycle
+
+    close(sk);
+    return 0;
+}
+
+
+
+
 
 
 static bool read_manifest(zipc_t* zip, char* ap_dat, char* ap_bin)
@@ -198,6 +278,24 @@ int gatt_write(int sock, uint16_t handle, uint8_t *data, size_t data_len, int re
     return 0;
 }
 
+
+
+int gatt_write2(int sock, int s2, uint16_t handle, uint8_t *data, size_t data_len, int response) {
+    uint8_t tx_buf[256];
+    tx_buf[0] = response ? ATT_OP_WRITE_REQ : ATT_OP_WRITE_CMD;
+    tx_buf[1] = handle & 0xFF;
+    tx_buf[2] = (handle >> 8) & 0xFF;
+    memcpy(&tx_buf[3], data, data_len);
+    
+    if (write(sock, tx_buf, 3 + data_len) < 0) return -1;
+    if (response) {
+        uint8_t rx_buf[16];
+        return (read(s2, rx_buf, sizeof(rx_buf)) > 0 && rx_buf[0] == 0x13) ? 0 : -1;
+    }
+    return 0;
+}
+
+
 static struct option ble_options[] = {{"help", no_argument, NULL, 'h'},
 					{"verbose", optional_argument, NULL, 'v'},
 					{"addr", required_argument, NULL, 'a'},
@@ -291,8 +389,11 @@ static void main_options(int argc, char* argv[])
 }
 void enter_bootloader(void) {
 
+    int client;
     int sock = socket(AF_BLUETOOTH, SOCK_SEQPACKET, BTPROTO_L2CAP);
     struct sockaddr_l2 src = {0}, dst = {0};
+    socklen_t opt = sizeof(dst);
+
     src.l2_family = AF_BLUETOOTH;
     src.l2_cid = htobs(4); // ATT CID
 
@@ -304,12 +405,23 @@ void enter_bootloader(void) {
     dst.l2_cid = htobs(4);
     dst.l2_bdaddr_type = conf.ble_atype;
 
+    struct l2cap_options opts;
+    socklen_t optlen = sizeof(opts);
+    getsockopt(sock, SOL_L2CAP, L2CAP_OPTIONS, &opts, &optlen);
+    opts.mode = 0; // L2CAP_MODE_BASIC
+    LOG_ERR("L2CAP_options: omtu: %d imtu: %d flush_to %d mode: %d fcs: %d max_tx: %d txwin_size %d", \
+    opts.omtu,opts.imtu,opts.flush_to,opts.mode,opts.fcs,opts.max_tx,opts.txwin_size);
+    if (setsockopt(sock, SOL_L2CAP, L2CAP_OPTIONS, &opts, sizeof(opts)) < 0) {
+	LOG_ERR("Failed to set L2CAP options");
+    }
 
     if (connect(sock, (struct sockaddr *)&dst, sizeof(dst)) < 0) {
 	LOG_ERR("Could not connect: %s, trying bootloader mode...",strerror(errno));
 	return;
 
     } else LOG_INF("Connected.");
+
+    //client = accept(sock,(struct sockaddr *)&dst, &opt);
 
     uint8_t cccd_data[2] = {0x01, 0x00};
     gatt_write(sock, DFU_CONTROL_POINT_HANDLE + 1, cccd_data, 2, 1); // CCCD
@@ -337,7 +449,7 @@ void dfu_upgrade(zipc_t* zip, const char* dat_name, const char* fw_name) {
     int sock;
     struct sockaddr_l2 src = {0}, dst = {0};
 
-
+    configure_hci0_for_ble();
     enter_bootloader();
 
     for (tries=0; tries<TRIES; tries++) {
