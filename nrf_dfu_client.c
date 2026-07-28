@@ -49,6 +49,8 @@
 #include "zipc.h"
 #include "conf.h"
 
+#include <poll.h>
+
 #define DFU_CONTROL_POINT_HANDLE 0x0012 
 #define DFU_PACKET_HANDLE        0x0010 
 
@@ -97,6 +99,59 @@ struct mgmt_mode_cmd {
     uint8_t val;
 } __attribute__((packed));
 
+struct mgmt_ev_cmd_complete {
+    uint16_t opcode;
+    uint8_t status;
+} __attribute__((packed));
+
+struct mgmt_ev_cmd_status {
+    uint16_t opcode;
+    uint8_t status;
+} __attribute__((packed));
+
+#define MGMT_EV_CMD_COMPLETE   0x0001
+#define MGMT_EV_CMD_STATUS     0x0002
+
+static int wait_mgmt_reply(int sk, uint16_t expected_opcode)
+{
+    uint8_t buf[256];
+
+    while (1) {
+        int n = read(sk, buf, sizeof(buf));
+        if (n < (int)sizeof(struct mgmt_hdr))
+            return -1;
+
+        struct mgmt_hdr *hdr = (struct mgmt_hdr *)buf;
+
+        uint16_t event = le16toh(hdr->opcode);
+        uint16_t len   = le16toh(hdr->len);
+
+        if (event == MGMT_EV_CMD_COMPLETE) {
+            struct mgmt_ev_cmd_complete *cc =
+                (void *)(buf + sizeof(*hdr));
+
+            if (le16toh(cc->opcode) != expected_opcode)
+                continue;
+
+            return cc->status ? -cc->status : 0;
+        }
+
+        if (event == MGMT_EV_CMD_STATUS) {
+            struct mgmt_ev_cmd_status *cs =
+                (void *)(buf + sizeof(*hdr));
+
+            if (le16toh(cs->opcode) != expected_opcode)
+                continue;
+
+            return -cs->status;
+        }
+
+        /* inne eventy ignorujemy */
+    }
+}
+
+
+
 static int send_mgmt_cmd(int sk, uint16_t opcode, uint16_t index, uint8_t value) {
     struct mgmt_mode_cmd cmd;
     
@@ -109,7 +164,8 @@ static int send_mgmt_cmd(int sk, uint16_t opcode, uint16_t index, uint8_t value)
         perror("Mgmt write failed");
         return -1;
     }
-    return 0;
+    return wait_mgmt_reply(sk, opcode);
+    //return 0;
 }
 
 
@@ -141,7 +197,7 @@ int configure_hci0_for_ble(void) {
     if (send_mgmt_cmd(sk, MGMT_OP_SET_POWERED, controller_idx, 0) < 0) {
         fprintf(stderr, "Failed to power off controller\n");
     }
-    usleep(300000); // 300ms: Embedded controllers need longer to reset state machines
+    //usleep(300000); // 300ms: Embedded controllers need longer to reset state machines
 
     // 2. Force Low Energy (LE) Mode ON
     if (send_mgmt_cmd(sk, MGMT_OP_SET_LE, controller_idx, 1) < 0) {
@@ -149,7 +205,7 @@ int configure_hci0_for_ble(void) {
         close(sk);
         return -1;
     }
-    usleep(200000);
+    //usleep(200000);
 
     // 3. Turn Power back ON 
     if (send_mgmt_cmd(sk, MGMT_OP_SET_POWERED, controller_idx, 1) < 0) {
@@ -157,7 +213,7 @@ int configure_hci0_for_ble(void) {
         close(sk);
         return -1;
     }
-    usleep(300000); // Allow hardware link layer to settle
+    //usleep(300000); // Allow hardware link layer to settle
 
 
 
@@ -291,7 +347,20 @@ int gatt_write(int sock, uint16_t handle, uint8_t *data, size_t data_len, int re
     if (write(sock, tx_buf, 3 + data_len) < 0) return -1;
     if (response) {
         uint8_t rx_buf[16];
-        return (read(sock, rx_buf, sizeof(rx_buf)) > 0 && rx_buf[0] == 0x13) ? 0 : -1;
+	struct pollfd p = {
+	    .fd = sock,
+	    .events = POLLIN
+	};
+	int r = poll(&p, 1, 2000);
+	printf("poll=%d revents=%x errno=%d\n",r,p.revents,errno);
+	if (r > 0)
+	{
+	    int n = recv(sock, rx_buf, sizeof(rx_buf), MSG_DONTWAIT);
+	    printf("recv=%d errno=%d\n", n, errno);
+	    return ((n > 0) && (rx_buf[0] == 0x13)) ? 0 : -1;
+	}
+	
+        //return (read(sock, rx_buf, sizeof(rx_buf)) > 0 && rx_buf[0] == 0x13) ? 0 : -1;
     }
     return 0;
 }
@@ -423,6 +492,7 @@ void enter_bootloader(void) {
     dst.l2_cid = htobs(4);
     dst.l2_bdaddr_type = conf.ble_atype;
 
+/*
     struct l2cap_options opts;
     socklen_t optlen = sizeof(opts);
     getsockopt(sock, SOL_L2CAP, L2CAP_OPTIONS, &opts, &optlen);
@@ -432,7 +502,7 @@ void enter_bootloader(void) {
     if (setsockopt(sock, SOL_L2CAP, L2CAP_OPTIONS, &opts, sizeof(opts)) < 0) {
 	LOG_ERR("Failed to set L2CAP options");
     }
-
+*/
     if (connect(sock, (struct sockaddr *)&dst, sizeof(dst)) < 0) {
 	LOG_ERR("Could not connect: %s, trying bootloader mode...",strerror(errno));
 	return;
