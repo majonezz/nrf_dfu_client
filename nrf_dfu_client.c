@@ -42,13 +42,13 @@
 #include <sys/select.h>
 #include <bluetooth/bluetooth.h>
 #include <bluetooth/hci.h>
+#include <bluetooth/hci_lib.h>
 #include <bluetooth/l2cap.h>
 #include <errno.h>
 #include <getopt.h>
 #include "json.h"
 #include "zipc.h"
 #include "conf.h"
-
 #include <poll.h>
 
 #define DFU_CONTROL_POINT_HANDLE 0x0012 
@@ -74,7 +74,6 @@
 
 
 // Standard BlueZ kernel constants for control channel
-//#define AF_BLUETOOTH        31
 #define BTPROTO_HCI         1
 #define HCI_CHANNEL_CONTROL 3
 
@@ -82,6 +81,9 @@
 #define MGMT_OP_SET_POWERED 0x0005
 #define MGMT_OP_SET_LE      0x000D
 
+
+#define MGMT_EV_CMD_COMPLETE   0x0001
+#define MGMT_EV_CMD_STATUS     0x0002
 
 struct config conf;
 
@@ -109,9 +111,6 @@ struct mgmt_ev_cmd_status {
     uint8_t status;
 } __attribute__((packed));
 
-#define MGMT_EV_CMD_COMPLETE   0x0001
-#define MGMT_EV_CMD_STATUS     0x0002
-
 static int wait_mgmt_reply(int sk, uint16_t expected_opcode)
 {
     uint8_t buf[256];
@@ -120,33 +119,21 @@ static int wait_mgmt_reply(int sk, uint16_t expected_opcode)
         int n = read(sk, buf, sizeof(buf));
         if (n < (int)sizeof(struct mgmt_hdr))
             return -1;
-
         struct mgmt_hdr *hdr = (struct mgmt_hdr *)buf;
-
         uint16_t event = le16toh(hdr->opcode);
-        uint16_t len   = le16toh(hdr->len);
 
         if (event == MGMT_EV_CMD_COMPLETE) {
-            struct mgmt_ev_cmd_complete *cc =
-                (void *)(buf + sizeof(*hdr));
-
-            if (le16toh(cc->opcode) != expected_opcode)
-                continue;
-
+            struct mgmt_ev_cmd_complete *cc = (void *)(buf + sizeof(*hdr));
+	    if (le16toh(cc->opcode) != expected_opcode) continue;
             return cc->status ? -cc->status : 0;
         }
 
         if (event == MGMT_EV_CMD_STATUS) {
-            struct mgmt_ev_cmd_status *cs =
-                (void *)(buf + sizeof(*hdr));
-
-            if (le16toh(cs->opcode) != expected_opcode)
-                continue;
-
-            return -cs->status;
+            struct mgmt_ev_cmd_status *cs = (void *)(buf + sizeof(*hdr));
+	    if (le16toh(cs->opcode) != expected_opcode) continue;
+	    return -cs->status;
         }
 
-        /* inne eventy ignorujemy */
     }
 }
 
@@ -161,7 +148,7 @@ static int send_mgmt_cmd(int sk, uint16_t opcode, uint16_t index, uint8_t value)
     cmd.val        = value;
 
     if (write(sk, &cmd, sizeof(cmd)) < 0) {
-        perror("Mgmt write failed");
+        LOG_ERR("Mgmt write failed");
         return -1;
     }
     return wait_mgmt_reply(sk, opcode);
@@ -172,12 +159,16 @@ static int send_mgmt_cmd(int sk, uint16_t opcode, uint16_t index, uint8_t value)
 int configure_hci0_for_ble(void) {
     int sk;
     struct sockaddr_hci addr;
-    uint16_t controller_idx = 0; // hci0
+    uint16_t controller_idx = hci_devid(conf.interface);
 
+    if (controller_idx < 0) {
+        LOG_ERR("HCI device %s not found", conf.interface);
+        return -1;
+    }
     // 1. Open the BlueZ Kernel Management Control Channel
     sk = socket(AF_BLUETOOTH, SOCK_RAW | SOCK_CLOEXEC, BTPROTO_HCI);
     if (sk < 0) {
-        perror("Failed to open mgmt socket");
+        LOG_ERR("Failed to open mgmt socket");
         return -1;
     }
 
@@ -187,35 +178,27 @@ int configure_hci0_for_ble(void) {
     addr.hci_dev = HCI_DEV_NONE; // Non-specific adapter for binding
 
     if (bind(sk, (struct sockaddr *) &addr, sizeof(addr)) < 0) {
-        perror("Failed to bind mgmt socket");
+        LOG_ERR("Failed to bind mgmt socket");
         close(sk);
         return -1;
     }
-
     // 1. Force absolute power OFF first.
     // Older kernels reject LE toggles if the driver thinks it's still alive.
     if (send_mgmt_cmd(sk, MGMT_OP_SET_POWERED, controller_idx, 0) < 0) {
-        fprintf(stderr, "Failed to power off controller\n");
+        LOG_ERR("Failed to power off controller");
     }
-    //usleep(300000); // 300ms: Embedded controllers need longer to reset state machines
-
     // 2. Force Low Energy (LE) Mode ON
     if (send_mgmt_cmd(sk, MGMT_OP_SET_LE, controller_idx, 1) < 0) {
-        fprintf(stderr, "Failed to set LE command\n");
+        LOG_ERR("Failed to set LE command");
         close(sk);
         return -1;
     }
-    //usleep(200000);
-
     // 3. Turn Power back ON 
     if (send_mgmt_cmd(sk, MGMT_OP_SET_POWERED, controller_idx, 1) < 0) {
-        fprintf(stderr, "Failed to power on controller\n");
+        LOG_ERR("Failed to power on controller");
         close(sk);
         return -1;
     }
-    //usleep(300000); // Allow hardware link layer to settle
-
-
 
     close(sk);
     return 0;
@@ -339,11 +322,15 @@ int wait_for_dfu_response(int sock, uint8_t expected_dfu_op, int timeout_sec) {
 
 int gatt_write(int sock, uint16_t handle, uint8_t *data, size_t data_len, int response) {
     uint8_t tx_buf[256];
+
     tx_buf[0] = response ? ATT_OP_WRITE_REQ : ATT_OP_WRITE_CMD;
     tx_buf[1] = handle & 0xFF;
     tx_buf[2] = (handle >> 8) & 0xFF;
     memcpy(&tx_buf[3], data, data_len);
     
+    LOG_DBG("gatt_write() called. len:%ld, handle %d", data_len, handle);
+    for (int i=0; i<data_len+3; i++) LOG_DBG("%02X ",tx_buf[i]);
+    //printf("\n");
     if (write(sock, tx_buf, 3 + data_len) < 0) return -1;
     if (response) {
         uint8_t rx_buf[16];
@@ -352,11 +339,13 @@ int gatt_write(int sock, uint16_t handle, uint8_t *data, size_t data_len, int re
 	    .events = POLLIN
 	};
 	int r = poll(&p, 1, 2000);
-	printf("poll=%d revents=%x errno=%d\n",r,p.revents,errno);
+	LOG_DBG("poll=%d revents=%x errno=%d\n",r,p.revents,errno);
 	if (r > 0)
 	{
 	    int n = recv(sock, rx_buf, sizeof(rx_buf), MSG_DONTWAIT);
-	    printf("recv=%d errno=%d\n", n, errno);
+	    LOG_DBG("recv=%d errno=%d rx=", n, errno);
+	    for (int i=0; i<n; i++) LOG_DBG("%02X ",rx_buf[i]);
+		//printf("\n");
 	    return ((n > 0) && (rx_buf[0] == 0x13)) ? 0 : -1;
 	}
 	
@@ -365,23 +354,12 @@ int gatt_write(int sock, uint16_t handle, uint8_t *data, size_t data_len, int re
     return 0;
 }
 
-
-
-int gatt_write2(int sock, int s2, uint16_t handle, uint8_t *data, size_t data_len, int response) {
-    uint8_t tx_buf[256];
-    tx_buf[0] = response ? ATT_OP_WRITE_REQ : ATT_OP_WRITE_CMD;
-    tx_buf[1] = handle & 0xFF;
-    tx_buf[2] = (handle >> 8) & 0xFF;
-    memcpy(&tx_buf[3], data, data_len);
-    
-    if (write(sock, tx_buf, 3 + data_len) < 0) return -1;
-    if (response) {
-        uint8_t rx_buf[16];
-        return (read(s2, rx_buf, sizeof(rx_buf)) > 0 && rx_buf[0] == 0x13) ? 0 : -1;
-    }
-    return 0;
+void serialize_u32(uint32_t value, uint8_t *buffer) {
+    buffer[3] = (value >> 24) & 0xFF;
+    buffer[2] = (value >> 16) & 0xFF;
+    buffer[1] = (value >> 8)  & 0xFF;
+    buffer[0] = value         & 0xFF;
 }
-
 
 static struct option ble_options[] = {{"help", no_argument, NULL, 'h'},
 					{"verbose", optional_argument, NULL, 'v'},
@@ -407,9 +385,6 @@ static void usage(void)
 
     );
 }
-
-
-
 
 static void main_options(int argc, char* argv[])
 {
@@ -476,10 +451,8 @@ static void main_options(int argc, char* argv[])
 }
 void enter_bootloader(void) {
 
-    int client;
     int sock = socket(AF_BLUETOOTH, SOCK_SEQPACKET, BTPROTO_L2CAP);
     struct sockaddr_l2 src = {0}, dst = {0};
-    socklen_t opt = sizeof(dst);
 
     src.l2_family = AF_BLUETOOTH;
     src.l2_cid = htobs(4); // ATT CID
@@ -491,25 +464,11 @@ void enter_bootloader(void) {
     str2ba(conf.ble_addr, &dst.l2_bdaddr);
     dst.l2_cid = htobs(4);
     dst.l2_bdaddr_type = conf.ble_atype;
-
-/*
-    struct l2cap_options opts;
-    socklen_t optlen = sizeof(opts);
-    getsockopt(sock, SOL_L2CAP, L2CAP_OPTIONS, &opts, &optlen);
-    opts.mode = 0; // L2CAP_MODE_BASIC
-    LOG_ERR("L2CAP_options: omtu: %d imtu: %d flush_to %d mode: %d fcs: %d max_tx: %d txwin_size %d", \
-    opts.omtu,opts.imtu,opts.flush_to,opts.mode,opts.fcs,opts.max_tx,opts.txwin_size);
-    if (setsockopt(sock, SOL_L2CAP, L2CAP_OPTIONS, &opts, sizeof(opts)) < 0) {
-	LOG_ERR("Failed to set L2CAP options");
-    }
-*/
     if (connect(sock, (struct sockaddr *)&dst, sizeof(dst)) < 0) {
 	LOG_ERR("Could not connect: %s, trying bootloader mode...",strerror(errno));
 	return;
 
     } else LOG_INF("Connected.");
-
-    //client = accept(sock,(struct sockaddr *)&dst, &opt);
 
     uint8_t cccd_data[2] = {0x01, 0x00};
     gatt_write(sock, DFU_CONTROL_POINT_HANDLE + 1, cccd_data, 2, 1); // CCCD
@@ -519,10 +478,7 @@ void enter_bootloader(void) {
 
     close(sock);
     sleep(1);
-
-
 }
-
 
 void dfu_upgrade(zipc_t* zip, const char* dat_name, const char* fw_name) {
 
@@ -569,7 +525,7 @@ void dfu_upgrade(zipc_t* zip, const char* dat_name, const char* fw_name) {
 
 	zipc_file_t *zf = zipcOpenFile(zip, dat_name);
 	init_len = zipcFileRead(zf, buf2, sizeof(buf2));
-
+	LOG_DBG("DAT file len is %ld",init_len);
 	if (init_len < 0) {
 	    LOG_ERR("zip_fread error");
 	    return;
@@ -584,7 +540,9 @@ void dfu_upgrade(zipc_t* zip, const char* dat_name, const char* fw_name) {
 	uint8_t start_p[2] = {OP_CODE_START_DFU, UPLOAD_MODE_APPLICATION};
 	gatt_write(sock, DFU_CONTROL_POINT_HANDLE, start_p, 2, 1);
 	uint8_t size_p[12];
-	memcpy(size_p, &sd, 4); memcpy(size_p+4, &bl, 4); memcpy(size_p+8, &app_size, 4);
+	serialize_u32(sd, &size_p[0]);
+	serialize_u32(bl, &size_p[4]);
+	serialize_u32(app_size, &size_p[8]);
 	gatt_write(sock, DFU_PACKET_HANDLE, size_p, 12, 0);
 	if (wait_for_dfu_response(sock, OP_CODE_START_DFU, 10) == 0) LOG_INF("Sizes sent.");
 	else {
@@ -623,8 +581,8 @@ void dfu_upgrade(zipc_t* zip, const char* dat_name, const char* fw_name) {
 	gatt_write(sock, DFU_PACKET_HANDLE, chunk, bytes_read, 0);
         if ((i/20 + 1) % 10 == 0) {
 	    if (wait_for_dfu_response(sock, OP_CODE_PACKET_RECEIPT_NOTIF, 5)==0) {
-		printf("%d from %d bytes sent (%.f%%)\r",i, app_size, (float)i/app_size*100.0);
-		fflush(stdout);
+		fprintf(stderr,"%d from %d bytes sent (%.f%%)\r",i, app_size, (float)i/app_size*100.0);
+		fflush(stderr);
 	    }
 	    else LOG_ERR("Bytes sending error!");
 
