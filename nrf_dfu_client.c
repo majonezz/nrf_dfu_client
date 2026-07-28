@@ -328,28 +328,26 @@ int gatt_write(int sock, uint16_t handle, uint8_t *data, size_t data_len, int re
     tx_buf[2] = (handle >> 8) & 0xFF;
     memcpy(&tx_buf[3], data, data_len);
     
-    LOG_DBG("gatt_write() called. len:%ld, handle %d", data_len, handle);
-    for (int i=0; i<data_len+3; i++) LOG_DBG("%02X ",tx_buf[i]);
+    //LOG_DBG("gatt_write() called. len:%ld, handle %d", data_len, handle);
+    //for (int i=0; i<data_len+3; i++) LOG_DBG("%02X ",tx_buf[i]);
     //printf("\n");
     if (write(sock, tx_buf, 3 + data_len) < 0) return -1;
     if (response) {
         uint8_t rx_buf[16];
-	struct pollfd p = {
-	    .fd = sock,
-	    .events = POLLIN
-	};
-	int r = poll(&p, 1, 2000);
-	LOG_DBG("poll=%d revents=%x errno=%d\n",r,p.revents,errno);
-	if (r > 0)
-	{
-	    int n = recv(sock, rx_buf, sizeof(rx_buf), MSG_DONTWAIT);
-	    LOG_DBG("recv=%d errno=%d rx=", n, errno);
-	    for (int i=0; i<n; i++) LOG_DBG("%02X ",rx_buf[i]);
-		//printf("\n");
-	    return ((n > 0) && (rx_buf[0] == 0x13)) ? 0 : -1;
-	}
-	
-        //return (read(sock, rx_buf, sizeof(rx_buf)) > 0 && rx_buf[0] == 0x13) ? 0 : -1;
+		struct pollfd p = {
+	    	.fd = sock,
+	    	.events = POLLIN
+		};
+		int r = poll(&p, 1, 2000);
+		//LOG_DBG("poll=%d revents=%x errno=%d\n",r,p.revents,errno);
+		if (r > 0)
+		{
+	    	int n = recv(sock, rx_buf, sizeof(rx_buf), MSG_DONTWAIT);
+	    	//LOG_DBG("recv=%d errno=%d rx=", n, errno);
+	    	//for (int i=0; i<n; i++) LOG_DBG("%02X ",rx_buf[i]);
+			//printf("\n");
+	    	return ((n > 0) && (rx_buf[0] == 0x13)) ? 0 : -1;
+		}
     }
     return 0;
 }
