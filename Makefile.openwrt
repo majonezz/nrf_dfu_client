@@ -1,0 +1,36 @@
+include $(TOPDIR)/rules.mk
+
+PKG_NAME:=nrf_dfu_client
+PKG_VERSION:=2026-07-29
+PKG_RELEASE:=1.5.3
+
+PKG_SOURCE_VERSION:=6c0af430ee82626d95ccb6632fbf95531f2e6fa3
+PKG_SOURCE_URL:=https://codeload.github.com/majonezz/nrf_dfu_client/tar.gz/$(PKG_SOURCE_VERSION)?
+PKG_SOURCE:=$(PKG_NAME)-$(PKG_SOURCE_VERSION).tar.gz
+PKG_HASH:=skip
+
+PKG_BUILD_DIR:=$(BUILD_DIR)/$(PKG_NAME)-$(PKG_VERSION)/$(PKG_NAME)-$(PKG_SOURCE_VERSION)
+
+PKG_MAINTAINER:=majonezz
+PKG_LICENSE:=MIT
+
+include $(INCLUDE_DIR)/package.mk
+
+define Package/nrf_dfu_client
+  SECTION:=utils
+  CATEGORY:=Utilities
+  TITLE:=Minimal Nordic Legacy DFU Tool
+  DEPENDS:=+zlib +bluez-libs
+  URL:=https://github.com/majonezz/nrf_dfu_client
+endef
+
+define Package/nrf_dfu_client/description
+  A minimal command-line utility for Nordic Semiconductor Legacy Device Firmware Updates (DFU) over BLE
+endef
+
+define Package/nrf_dfu_client/install
+	$(INSTALL_DIR) $(1)/usr/bin
+	$(INSTALL_BIN) $(PKG_BUILD_DIR)/nrf_dfu $(1)/usr/bin/
+endef
+
+$(eval $(call BuildPackage,nrf_dfu_client))
