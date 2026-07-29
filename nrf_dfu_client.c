@@ -523,7 +523,7 @@ void dfu_upgrade(zipc_t* zip, const char* dat_name, const char* fw_name) {
 
 	zipc_file_t *zf = zipcOpenFile(zip, dat_name);
 	init_len = zipcFileRead(zf, buf2, sizeof(buf2));
-	LOG_DBG("DAT file len is %ld",init_len);
+	LOG_DBG("DAT file len is %d",(int)init_len);
 	if (init_len < 0) {
 	    LOG_ERR("zip_fread error");
 	    return;
