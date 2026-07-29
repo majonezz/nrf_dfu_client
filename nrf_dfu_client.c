@@ -587,13 +587,13 @@ void dfu_upgrade(zipc_t* zip, const char* dat_name, const char* fw_name) {
 	}
 
     }
-    if (wait_for_dfu_response(sock, OP_CODE_RECEIVE_FIRMWARE_IMAGE, 20)==0) LOG_INF("\nFirmware sent.");
+    if (wait_for_dfu_response(sock, OP_CODE_RECEIVE_FIRMWARE_IMAGE, 20)==0) LOG_NOTI("\nFirmware sent.");
     else LOG_ERR("\nFirmware sending error!"); 
 
     // 4. Walidacja i Reset
     uint8_t val_cmd[1] = {OP_CODE_VALIDATE};
     gatt_write(sock, DFU_CONTROL_POINT_HANDLE, val_cmd, 1, 1);
-    if (wait_for_dfu_response(sock, OP_CODE_VALIDATE, 10)==0) LOG_INF("Validate ok.");
+    if (wait_for_dfu_response(sock, OP_CODE_VALIDATE, 10)==0) LOG_NOTI("Validate ok.");
     else LOG_ERR("Validation error!");
 
     uint8_t res_cmd[1] = {OP_CODE_ACTIVATE_AND_RESET};
